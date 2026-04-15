@@ -13,7 +13,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,6 +28,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -45,16 +49,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Configuración para mantener la pantalla del televisor siempre encendida mientras la app esté abierta
+        // Configuración para mantener la pantalla del televisor siempre encendida
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         
         setContent {
-            // Contenedor principal con fondo negro para evitar destellos blancos al iniciar
+            // Contenedor principal con fondo negro
             Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-                // URL del streaming en vivo (formato HLS/M3U8)
                 val videoUrl = "https://1206618505.rsc.cdn77.org/LS-ATL-59020-1/tracks-v1a1/mono.ts.m3u8"
-                
-                // Llamada al componente del reproductor de video
                 SimplePlayer(url = videoUrl)
             }
         }
@@ -62,81 +63,129 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Componente que gestiona el reproductor de video ExoPlayer.
+ * Componente que gestiona el reproductor de video ExoPlayer con auto-reconexión.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun SimplePlayer(url: String) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    
+    var isLoading by remember { mutableStateOf(true) }
+    var isError by remember { mutableStateOf(false) }
 
-    // Inicialización y configuración del reproductor ExoPlayer
-    // Se usa 'remember' para que el reproductor no se reinicie al recomponer la UI
+    // Inicialización del reproductor
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            // Definir el elemento multimedia a partir de la URL
-            setMediaItem(MediaItem.fromUri(url))
-            // Preparar el reproductor (empezar a cargar el buffer)
+        val player = ExoPlayer.Builder(context).build()
+        player.apply {
+            val mediaItem = MediaItem.Builder()
+                .setUri(url)
+                .setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(5000)
+                        .build()
+                )
+                .build()
+            
+            setMediaItem(mediaItem)
+            
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    isLoading = (playbackState != Player.STATE_READY)
+                    if (playbackState == Player.STATE_READY) {
+                        isError = false 
+                    }
+                }
+
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    isError = true
+                    isLoading = false
+                    // REINTENTO AUTOMÁTICO INFINITO: Cada 5 segundos
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        if (isError) { 
+                            prepare()
+                            play()
+                        }
+                    }, 5000)
+                }
+            })
+            
             prepare()
-            // Iniciar la reproducción automáticamente cuando esté listo
             playWhenReady = true
         }
+        player
     }
 
-    // Gestión del ciclo de vida: Pausar el video si el usuario sale de la app 
-    // y liberar los recursos (memoria/red) cuando la app se cierra.
+    // Gestión del ciclo de vida para evitar congelamiento al encender la TV
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                // Pausar si la app pasa a segundo plano
-                Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
-                // Reanudar si el usuario vuelve a la app
-                Lifecycle.Event.ON_RESUME -> exoPlayer.play()
+                Lifecycle.Event.ON_PAUSE -> exoPlayer.stop() 
+                Lifecycle.Event.ON_RESUME -> {
+                    isError = false
+                    isLoading = true
+                    val mediaItem = MediaItem.Builder()
+                        .setUri(url)
+                        .setLiveConfiguration(
+                            MediaItem.LiveConfiguration.Builder()
+                                .setTargetOffsetMs(5000)
+                                .build()
+                        )
+                        .build()
+                    exoPlayer.setMediaItem(mediaItem)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
+                }
                 else -> Unit
             }
         }
-        // Añadir el observador al ciclo de vida
         lifecycleOwner.lifecycle.addObserver(observer)
-        
         onDispose {
-            // Limpieza: quitar el observador y destruir el reproductor al cerrar el componente
             lifecycleOwner.lifecycle.removeObserver(observer)
             exoPlayer.release()
         }
     }
 
-    // Interfaz de usuario: Capas apiladas (Video debajo, Logo encima)
     Box(modifier = Modifier.fillMaxSize()) {
-        
-        // Integración de la vista de Android clásica (PlayerView) dentro de Jetpack Compose
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
-                    // Vincular el ExoPlayer a la vista
                     player = exoPlayer
-                    // Ocultar los controles de reproducción (pausa, barra de progreso) para TV
                     useController = false
                 }
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Indicador visual de "LIVE" (En Vivo) en la esquina superior izquierda
+        // Capa de mensajes de estado
+        if (isError) {
+            Text(
+                text = "Señal no disponible. Reintentando...",
+                color = Color.White.copy(alpha = 0.8f),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        } else if (isLoading) {
+            Text(
+                text = "Cargando señal en vivo...",
+                color = Color.White.copy(alpha = 0.5f),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
+        // Indicador visual LIVE
         StatusBadge(
             modifier = Modifier
-                .align(Alignment.TopStart) // Alinear arriba a la izquierda
-                .padding(32.dp) // Margen de seguridad para pantallas de TV
+                .align(Alignment.TopStart)
+                .padding(32.dp)
         )
     }
 }
 
-/**
- * Componente visual que muestra la etiqueta "LIVE" roja.
- */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun StatusBadge(modifier: Modifier = Modifier) {
-    // Fondo redondeado con un rojo más profesional (Material Design) y transparencia suave
     Surface(
         modifier = modifier,
         colors = SurfaceDefaults.colors(
@@ -148,14 +197,9 @@ fun StatusBadge(modifier: Modifier = Modifier) {
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Punto blanco que simula el indicador de grabación/vivo
             Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(Color.White)
+                modifier = Modifier.size(8.dp).clip(CircleShape).background(Color.White)
             )
-            // Texto descriptivo
             Text(
                 text = " LIVE TV",
                 color = Color.White,
