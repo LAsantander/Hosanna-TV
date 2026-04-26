@@ -175,11 +175,13 @@ fun SimplePlayer(url: String) {
         }
 
         // Indicador visual LIVE
-        StatusBadge(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(32.dp)
-        )
+        if (!isLoading && !isError) {
+            StatusBadge(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(32.dp)
+            )
+        }
     }
 }
 
