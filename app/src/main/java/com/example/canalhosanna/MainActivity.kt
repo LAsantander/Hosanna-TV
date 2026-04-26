@@ -167,7 +167,7 @@ fun SimplePlayer(url: String) {
             )
         } else if (isLoading) {
             Text(
-                text = "Cargando señal en vivo...",
+                text = "Cargando señal en vivo de Hosanna Vision...",
                 color = Color.White.copy(alpha = 0.5f),
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.align(Alignment.Center)
